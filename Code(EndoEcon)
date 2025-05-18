@@ -1,1 +1,809 @@
+#==================================================================
+# ENDOMETRIOSIS HEALTH ECONOMIC MODEL
+# A comprehensive model incorporating:
+# - Transition probabilities from literature
+# - Menstrual cycle quality of life fluctuations
+# - Dynamic cost modeling
+#==================================================================
 
+library(dplyr)
+library(ggplot2)
+
+#==================================================================
+# 1. DATA STRUCTURE AND PARAMETER SETUP
+#==================================================================
+
+#' Create data frame with transition probabilities
+#' @return Data frame of transition probabilities
+create_transition_data <- function() {
+  # Transition probability data based on literature
+  endo_transitions <- data.frame(
+    from_state = c(
+      "Symptom Control", 
+      "No Treatment", 
+      "Recurrence", 
+      "Recurrence", 
+      "Treatment Failure",
+      "Post-Surgery"
+    ),
+    to_state = c(
+      "Recurrence", 
+      "Recurrence", 
+      "Treatment Change", 
+      "Surgery", 
+      "Surgery",
+      "Recurrence"
+    ),
+    min_probability = c(
+      0.003, 
+      0.04, 
+      0.05, 
+      0.005, 
+      0.005,
+      0.01
+    ),
+    max_probability = c(
+      0.015, 
+      0.04, 
+      0.10, 
+      0.015, 
+      0.015,
+      0.03
+    ),
+    time_period = c(
+      "monthly", 
+      "monthly", 
+      "monthly", 
+      "monthly", 
+      "monthly",
+      "monthly"
+    ),
+    annual_min = c(
+      0.003*12, 
+      0.04*12, 
+      0.05*12, 
+      0.06, 
+      0.06,
+      0.01*12
+    ),
+    annual_max = c(
+      0.015*12, 
+      0.04*12, 
+      0.10*12, 
+      0.18, 
+      0.18,
+      0.03*12
+    ),
+    source = c(
+      "Sanghera et al. (2016), Grand et al. (2019)",
+      "Sanghera et al. (2016), Grand et al. (2019)",
+      "Sanghera et al. (2016), Grand et al. (2019)",
+      "Sanghera et al. (2016), Grand et al. (2019)",
+      "Sanghera et al. (2016), Grand et al. (2019)",
+      "Sanghera et al. (2016), Grand et al. (2019)"
+    ),
+    notes = c(
+      "Lower range for hormonal treatments like OCs or LNG-IUS",
+      "Higher relapse risk without ongoing medical therapy",
+      "Assumes change after failure of primary therapy",
+      "Surgical intervention often modeled after two medical failures",
+      "Surgical intervention often modeled after two medical failures",
+      "Based on risk of symptom return post-conservative surgery"
+    )
+  )
+  
+  return(endo_transitions)
+}
+
+#' Get base health state utilities
+#' @return Named vector of utilities by health state
+get_base_utilities <- function() {
+  # Base utility values for each health state
+  utilities <- c(
+    "Mild" = 0.85,
+    "Moderate" = 0.75,
+    "Severe" = 0.60,
+    "Surgery" = 0.65,
+    "Infertility" = 0.70,
+    "Remission" = 0.95,
+    "Death" = 0.00
+  )
+  
+  return(utilities)
+}
+
+#' Get base state costs
+#' @return Named vector of annual costs by health state
+get_base_state_costs <- function() {
+  # Annual costs for each health state
+  state_costs <- c(
+    "Mild" = 1200,        # Medication, regular check-ups
+    "Moderate" = 3500,    # Medication, more frequent visits
+    "Severe" = 6500,      # Intensive management
+    "Surgery" = 8000,     # Procedure cost
+    "Infertility" = 4000, # Fertility treatments/consultations
+    "Remission" = 500,    # Monitoring only
+    "Death" = 0
+  )
+  
+  return(state_costs)
+}
+
+#' Get treatment costs
+#' @return List of treatment costs by treatment
+get_treatment_costs <- function() {
+  # Initial and ongoing costs
+  treatment_costs <- list(
+    "Standard" = list(
+      name = "Combined Oral Contraceptives",
+      initial = 300,  # Initial consultation and tests
+      annual = 500,   # Medication and follow-up
+      monitoring = 200 # Annual monitoring costs
+    ),
+    
+    "GnRH" = list(
+      name = "GnRH Agonists",
+      initial = 500,  # Initial consultation and tests
+      annual = 2000,  # Medication costs
+      monitoring = 500 # More intensive monitoring
+    ),
+    
+    "Surgery" = list(
+      name = "Laparoscopic Excision",
+      initial = 8000,  # Procedure cost
+      annual = 200,    # Annual follow-up
+      monitoring = 300 # Post-surgical monitoring
+    ),
+    
+    "New" = list(
+      name = "Novel Treatment",
+      initial = 1000,  # Initial testing and consultation
+      annual = 3000,   # High-cost new treatment
+      monitoring = 600 # Intensive monitoring for new therapy
+    )
+  )
+  
+  return(treatment_costs)
+}
+
+#==================================================================
+# 2. TRANSITION PROBABILITY FUNCTIONS
+#==================================================================
+
+#' Create transition matrix for Markov model
+#' @param transition_data Data frame with transition probabilities
+#' @param use_max Whether to use maximum probabilities (default FALSE)
+#' @return Transition probability matrix
+create_monthly_transition_matrix <- function(transition_data, use_max_probs = FALSE) {
+  # Define all unique health states
+  states <- unique(c(transition_data$from_state, transition_data$to_state))
+  n_states <- length(states)
+  
+  # Initialize transition matrix with zeros
+  transition_matrix <- matrix(0, nrow = n_states, ncol = n_states)
+  rownames(transition_matrix) <- states
+  colnames(transition_matrix) <- states
+  
+  # Fill in known transitions
+  for (i in 1:nrow(transition_data)) {
+    from <- transition_data$from_state[i]
+    to <- transition_data$to_state[i]
+    
+    # Get probability based on preference
+    prob <- if (use_max_probs) {
+      transition_data$max_probability[i]
+    } else {
+      transition_data$min_probability[i]
+    }
+    
+    # Add to transition matrix
+    transition_matrix[from, to] <- prob
+  }
+  
+  # Calculate diagonal elements to ensure rows sum to 1
+  # (probability of staying in same state)
+  for (i in 1:n_states) {
+    state_name <- states[i]
+    row_sum <- sum(transition_matrix[state_name, ])
+    if (row_sum < 1) {
+      transition_matrix[state_name, state_name] <- 1 - row_sum
+    }
+  }
+  
+  return(transition_matrix)
+}
+
+#' Apply treatment effects to transition matrix
+#' @param base_matrix Base transition matrix
+#' @param treatment Treatment name
+#' @param patient_data Patient characteristics
+#' @return Adjusted transition matrix
+apply_treatment_effect <- function(base_matrix, treatment, patient_data = NULL) {
+  adjusted_matrix <- base_matrix
+  
+  if (treatment == "Standard") {
+    # COCs typically reduce progression and improve symptoms
+    
+    # Reduce progression to more severe states by 30%
+    for (state in c("Mild", "Moderate")) {
+      for (worse_state in c("Moderate", "Severe")) {
+        if (state != worse_state && 
+            base_matrix[state, worse_state] > 0) {
+          adjusted_matrix[state, worse_state] <- 
+            base_matrix[state, worse_state] * 0.7
+        }
+      }
+    }
+  }
+  else if (treatment == "GnRH") {
+    # GnRH agonists have stronger effect
+    
+    # Reduce progression by 50%
+    for (state in c("Mild", "Moderate")) {
+      for (worse_state in c("Moderate", "Severe")) {
+        if (state != worse_state && 
+            base_matrix[state, worse_state] > 0) {
+          adjusted_matrix[state, worse_state] <- 
+            base_matrix[state, worse_state] * 0.5
+        }
+      }
+    }
+    
+    # Increase chance of improvement
+    for (state in c("Moderate", "Severe")) {
+      for (better_state in c("Mild", "Remission")) {
+        if (base_matrix[state, better_state] > 0) {
+          adjusted_matrix[state, better_state] <- 
+            min(0.5, base_matrix[state, better_state] * 1.5)
+        }
+      }
+    }
+  }
+  else if (treatment == "Surgery") {
+    # Surgery has immediate effect on states
+    if ("Surgery" %in% rownames(base_matrix)) {
+      # Increased chance of improvement post-surgery
+      adjusted_matrix["Surgery", "Mild"] <- 0.5
+      adjusted_matrix["Surgery", "Moderate"] <- 0.2
+      adjusted_matrix["Surgery", "Severe"] <- 0.1
+      adjusted_matrix["Surgery", "Infertility"] <- 0.1
+      adjusted_matrix["Surgery", "Remission"] <- 0.05
+      adjusted_matrix["Surgery", "Death"] <- 0.02
+      adjusted_matrix["Surgery", "Surgery"] <- 0.03  # Reoperation
+    }
+  }
+  else if (treatment == "New") {
+    # Novel treatment with stronger effects
+    
+    # Reduce progression by 60%
+    for (state in c("Mild", "Moderate")) {
+      for (worse_state in c("Moderate", "Severe")) {
+        if (state != worse_state && 
+            base_matrix[state, worse_state] > 0) {
+          adjusted_matrix[state, worse_state] <- 
+            base_matrix[state, worse_state] * 0.4
+        }
+      }
+    }
+    
+    # Increase chance of improvement and remission
+    for (state in c("Moderate", "Severe")) {
+      if ("Remission" %in% colnames(base_matrix) && 
+          base_matrix[state, "Remission"] > 0) {
+        adjusted_matrix[state, "Remission"] <- 
+          min(0.2, base_matrix[state, "Remission"] * 3)
+      }
+    }
+  }
+  
+  # Re-normalize rows to ensure they sum to 1
+  for (i in 1:nrow(adjusted_matrix)) {
+    row_sum <- sum(adjusted_matrix[i, ])
+    if (row_sum != 1) {
+      # Adjust the diagonal element (staying in the same state)
+      state <- rownames(adjusted_matrix)[i]
+      adjusted_matrix[i, i] <- adjusted_matrix[i, i] + (1 - row_sum)
+    }
+  }
+  
+  return(adjusted_matrix)
+}
+
+#==================================================================
+# 3. QALY CALCULATION WITH MENSTRUAL CYCLE ADJUSTMENTS
+#==================================================================
+
+#' Calculate QALYs with menstrual cycle adjustments
+#' @param cohort_trace Matrix of cohort distribution across health states
+#' @param base_utilities Vector of baseline utility values for each state
+#' @param patient_age Patient's starting age
+#' @param discount_rate Annual discount rate
+#' @param cycle_length Cycle length in years
+#' @return Total discounted QALYs
+calculate_cyclical_qalys <- function(cohort_trace, 
+                                   base_utilities,
+                                   patient_age = 30,
+                                   discount_rate = 0.035,
+                                   cycle_length = 1/28) {
+  
+  # Get dimensions
+  n_cycles <- nrow(cohort_trace) - 1  # Number of cycles to simulate
+  states <- colnames(cohort_trace)    # Health states in the model
+  
+  # Initialize QALY accumulator
+  total_qalys <- 0
+  
+  # Loop through each cycle
+  for (t in 1:n_cycles) {
+    # Get cohort distribution for this cycle
+    cycle_distribution <- cohort_trace[t+1, ]
+    
+    # Calculate current cycle day (assuming 28-day cycles)
+    cycle_day <- ((t-1) %% 28) + 1
+    
+    # Get state utilities adjusted for menstrual cycle
+    adjusted_utilities <- base_utilities
+    
+    # Apply cycle-specific adjustments
+    for (state in names(base_utilities)) {
+      # Only adjust symptomatic states
+      if (state %in% c("Mild", "Moderate", "Severe")) {
+        
+        # Different adjustments by cycle phase
+        if (cycle_day >= 1 && cycle_day <= 5) {
+          # Menstruation phase - symptoms peak
+          cycle_adjustment <- -0.15  # Maximum disutility
+        } else if (cycle_day >= 14 && cycle_day <= 16) {
+          # Ovulation phase - potential mid-cycle pain
+          cycle_adjustment <- -0.08  # Moderate disutility
+        } else {
+          # Other phases
+          cycle_adjustment <- -0.02  # Minimal disutility
+        }
+        
+        # Scale adjustment based on disease severity
+        severity_factor <- switch(state,
+          "Mild" = 0.5,      # 50% of maximum adjustment
+          "Moderate" = 1.0,  # 100% of maximum adjustment
+          "Severe" = 1.5,    # 150% of maximum adjustment
+          1.0  # Default
+        )
+        
+        # Apply adjustment
+        cycle_adjustment <- cycle_adjustment * severity_factor
+        adjusted_utilities[state] <- max(0, min(1, adjusted_utilities[state] + cycle_adjustment))
+      }
+    }
+    
+    # Calculate utility for this cycle (weighted by state distribution)
+    cycle_utility <- sum(cycle_distribution * adjusted_utilities[states])
+    
+    # Apply discounting
+    year <- t * cycle_length
+    discount_factor <- 1 / (1 + discount_rate)^year
+    
+    # Calculate QALYs for this cycle
+    cycle_qalys <- cycle_utility * cycle_length * discount_factor
+    
+    # Add to total
+    total_qalys <- total_qalys + cycle_qalys
+  }
+  
+  return(total_qalys)
+}
+
+#' Extrapolate QALYs beyond model time horizon
+#' @param trace_qalys QALYs calculated from the model trace
+#' @param final_state_distribution Final distribution across health states
+#' @param base_utilities Base utility values by state
+#' @param current_age Age at end of model time horizon
+#' @param years_to_extrapolate Additional years to model
+#' @param discount_rate Annual discount rate
+#' @return Total extrapolated QALYs
+extrapolate_qalys <- function(trace_qalys,
+                            final_state_distribution,
+                            base_utilities,
+                            current_age,
+                            years_to_extrapolate = 20,
+                            discount_rate = 0.035) {
+  
+  # Start with QALYs from trace
+  total_qalys <- trace_qalys
+  
+  # Get expected utility at the end of the trace
+  expected_utility <- sum(final_state_distribution * base_utilities[names(final_state_distribution)])
+  
+  # Extrapolate for each additional year
+  for (year in 1:years_to_extrapolate) {
+    # Current age in extrapolation period
+    age <- current_age + year
+    
+    # Apply age adjustment
+    age_factor <- 1
+    if (age > 40) {
+      age_factor <- 1 - (0.005 * (age - 40))
+    }
+    
+    # Apply mortality risk (simplified)
+    survival_prob <- 1 - min(0.8, 0.003 * exp(0.08 * (age - 30) / 10))
+    
+    # Calculate utility for this year
+    yearly_utility <- expected_utility * age_factor * survival_prob
+    
+    # Apply discounting
+    discount_factor <- 1 / (1 + discount_rate)^(year)
+    yearly_qalys <- yearly_utility * discount_factor
+    
+    # Add to total
+    total_qalys <- total_qalys + yearly_qalys
+  }
+  
+  return(total_qalys)
+}
+
+#==================================================================
+# 4. DYNAMIC COST MODELING
+#==================================================================
+
+#' Calculate dynamic treatment costs over time
+#' @param treatment Treatment name
+#' @param cycle Current cycle number
+#' @param is_initial Whether this is the initial treatment cycle
+#' @param base_year Base year for costs
+#' @param current_year Current year in model
+#' @param inflation_rate Annual healthcare inflation rate
+#' @return Adjusted cost for this cycle
+calculate_dynamic_treatment_cost <- function(treatment,
+                                          cycle,
+                                          is_initial = FALSE,
+                                          base_year = 2023,
+                                          current_year = NULL,
+                                          inflation_rate = 0.03) {
+  # If current_year not provided, calculate from cycle
+  if (is.null(current_year)) {
+    # Assuming monthly cycles
+    years_passed <- cycle / 12
+    current_year <- base_year + years_passed
+  }
+  
+  # Get base treatment costs
+  treatment_costs <- get_treatment_costs()
+  
+  # Select initial or maintenance cost
+  if (is_initial) {
+    base_cost <- treatment_costs[[treatment]]$initial
+  } else {
+    base_cost <- treatment_costs[[treatment]]$annual / 12  # Monthly cost
+  }
+  
+  # 1. Apply healthcare inflation
+  years_since_base <- current_year - base_year
+  inflation_factor <- (1 + inflation_rate)^years_since_base
+  adjusted_cost <- base_cost * inflation_factor
+  
+  # 2. Apply patent expiry effects for pharmacological treatments
+  if (treatment %in% c("GnRH", "New")) {
+    # Patent durations
+    patent_expiry_year <- switch(treatment,
+      "GnRH" = base_year + 5,     # Assumed 5 years left on patent
+      "New" = base_year + 10,     # New drug has full patent life
+      base_year + 999  # Default: no expiry
+    )
+    
+    # If past patent expiry
+    if (current_year > patent_expiry_year) {
+      # Calculate years since expiry
+      years_post_patent <- current_year - patent_expiry_year
+      
+      # Initial price drop (70%)
+      generic_discount <- 0.7
+      
+      # Additional erosion over time (up to 10% more)
+      additional_discount <- min(0.1, 0.02 * years_post_patent)
+      
+      # Apply total discount
+      adjusted_cost <- adjusted_cost * (1 - (generic_discount + additional_discount))
+    }
+  }
+  
+  # 3. Apply learning curve effects for surgical procedures
+  else if (treatment == "Surgery") {
+    # Years since introduction of laparoscopic techniques
+    years_since_introduction <- 20 + (current_year - base_year)
+    
+    # Maximum efficiency gain (30%)
+    max_efficiency <- 0.3
+    
+    # Calculate efficiency gain (diminishing returns)
+    efficiency_gain <- max_efficiency * (1 - exp(-0.1 * years_since_introduction))
+    
+    # Apply efficiency discount
+    adjusted_cost <- adjusted_cost * (1 - efficiency_gain)
+    
+    # Special case: if this is the initial surgery, apply surgeon volume effect
+    if (is_initial) {
+      # Simplified surgeon volume effect
+      volume_discount <- 0.1  # 10% reduction for high-volume surgeons
+      adjusted_cost <- adjusted_cost * (1 - volume_discount)
+    }
+  }
+  
+  # 4. Apply institutional learning for diagnosis and monitoring
+  if (!is_initial && treatment != "Surgery") {
+    # Efficiency in monitoring improves over time
+    monitoring_efficiency <- min(0.2, 0.01 * (current_year - base_year))
+    adjusted_cost <- adjusted_cost * (1 - monitoring_efficiency)
+  }
+  
+  return(adjusted_cost)
+}
+
+#' Calculate state costs with dynamic adjustments
+#' @param state Health state
+#' @param cycle Current cycle
+#' @param patient_characteristics Patient characteristics
+#' @param base_year Base year for costs
+#' @param inflation_rate Annual healthcare inflation rate
+#' @return Adjusted state cost
+calculate_dynamic_state_cost <- function(state,
+                                       cycle,
+                                       patient_characteristics,
+                                       base_year = 2023,
+                                       inflation_rate = 0.03) {
+  # Get base state costs
+  state_costs <- get_base_state_costs()
+  base_cost <- state_costs[state]
+  
+  # Calculate current year
+  years_passed <- cycle / 12  # Assuming monthly cycles
+  current_year <- base_year + years_passed
+  
+  # 1. Apply healthcare inflation
+  inflation_factor <- (1 + inflation_rate)^years_passed
+  adjusted_cost <- base_cost * inflation_factor
+  
+  # 2. Apply age-related cost adjustments
+  current_age <- patient_characteristics$age + years_passed
+  
+  if (current_age > 40) {
+    # Healthcare utilization tends to increase with age
+    age_factor <- 1 + (0.01 * (current_age - 40))  # 1% increase per year over 40
+    adjusted_cost <- adjusted_cost * age_factor
+  }
+  
+  # 3. Apply technological improvements in diagnosis and management
+  if (state %in% c("Mild", "Moderate", "Severe")) {
+    # Diagnostic efficiency improves over time
+    diagnostic_improvement <- min(0.25, 0.01 * (current_year - base_year))
+    
+    # Pain management strategies improve
+    pain_management_improvement <- min(0.2, 0.008 * (current_year - base_year))
+    
+    # Apply improvements (weighted differently by state)
+    tech_improvement <- switch(state,
+      "Mild" = diagnostic_improvement * 0.7 + pain_management_improvement * 0.3,
+      "Moderate" = diagnostic_improvement * 0.5 + pain_management_improvement * 0.5,
+      "Severe" = diagnostic_improvement * 0.3 + pain_management_improvement * 0.7,
+      0  # Default: no improvement
+    )
+    
+    adjusted_cost <- adjusted_cost * (1 - tech_improvement)
+  }
+  
+  # 4. Specific adjustments for surgical states
+  if (state == "Surgery") {
+    # Trend toward minimally invasive procedures
+    surgical_efficiency <- min(0.3, 0.01 * (current_year - base_year))
+    
+    # Reduced length of stay over time
+    los_reduction <- min(0.4, 0.015 * (current_year - base_year))
+    
+    # Combined improvement (weighted)
+    surgery_improvement <- surgical_efficiency * 0.4 + los_reduction * 0.6
+    
+    adjusted_cost <- adjusted_cost * (1 - surgery_improvement)
+  }
+  
+  return(adjusted_cost)
+}
+
+#' Calculate total costs with dynamic adjustments
+#' @param cohort_trace Cohort trace matrix
+#' @param treatment Treatment name
+#' @param patient_characteristics Patient characteristics
+#' @param base_year Base year for costs
+#' @param discount_rate Annual discount rate
+#' @param inflation_rate Annual inflation rate
+#' @return Total discounted costs
+calculate_total_costs <- function(cohort_trace,
+                                treatment,
+                                patient_characteristics,
+                                base_year = 2023,
+                                discount_rate = 0.035,
+                                inflation_rate = 0.03) {
+  n_cycles <- nrow(cohort_trace) - 1
+  states <- colnames(cohort_trace)
+  
+  # Initialize cost accumulator
+  total_costs <- 0
+  
+  for (t in 1:n_cycles) {
+    # Is this the initial cycle?
+    is_initial <- (t == 1)
+    
+    # Calculate state costs
+    state_costs <- 0
+    for (state in states) {
+      # Get cohort proportion in this state
+      proportion <- cohort_trace[t+1, state]
+      
+      # Skip if no patients in this state
+      if (proportion <= 0) next
+      
+      # Get dynamic cost for this state and cycle
+      state_cost <- calculate_dynamic_state_cost(
+        state, 
+        t, 
+        patient_characteristics,
+        base_year,
+        inflation_rate
+      )
+      
+      # Add to total state costs, weighted by proportion
+      state_costs <- state_costs + (proportion * state_cost)
+    }
+    
+    # Calculate treatment costs
+    treatment_cost <- calculate_dynamic_treatment_cost(
+      treatment,
+      t,
+      is_initial,
+      base_year,
+      NULL,
+      inflation_rate
+    )
+    
+    # Combine costs for this cycle
+    cycle_costs <- state_costs + treatment_cost
+    
+    # Apply discounting
+    years_passed <- t / 12  # Convert cycles to years
+    discount_factor <- 1 / (1 + discount_rate)^years_passed
+    discounted_costs <- cycle_costs * discount_factor
+    
+    # Add to total
+    total_costs <- total_costs + discounted_costs
+  }
+  
+  return(total_costs)
+}
+
+#==================================================================
+# 5. MARKOV MODEL SIMULATION
+#==================================================================
+
+#' Run the endometriosis Markov model
+#' @param initial_state Initial health state distribution
+#' @param transitions Transition probability matrix
+#' @param n_cycles Number of cycles to simulate
+#' @param treatment Treatment to simulate
+#' @param patient_characteristics Patient characteristics
+#' @return List with model results
+run_endo_model <- function(initial_state = c(Mild = 0.5, Moderate = 0.4, Severe = 0.1),
+                          transitions,
+                          n_cycles = 360,  # 30 years of monthly cycles
+                          treatment = "Standard",
+                          patient_characteristics = list(age = 30)) {
+  
+  # Get state names
+  states <- names(initial_state)
+  
+  # Initialize trace matrix
+  trace <- matrix(0, nrow = n_cycles + 1, ncol = length(states))
+  colnames(trace) <- states
+  
+  # Set initial state
+  trace[1, ] <- initial_state
+  
+  # Apply treatment effect to transitions
+  adjusted_transitions <- apply_treatment_effect(transitions, treatment, patient_characteristics)
+  
+  # Run Markov model
+  for (t in 1:n_cycles) {
+    # Apply transition matrix
+    trace[t+1, ] <- trace[t, ] %*% adjusted_transitions
+  }
+  
+  # Calculate outcomes
+  base_utilities <- get_base_utilities()[states]
+  
+  # QALYs with cycle adjustments
+  qalys <- calculate_cyclical_qalys(
+    trace,
+    base_utilities,
+    patient_characteristics$age,
+    discount_rate = 0.035,
+    cycle_length = 1/12  # Monthly cycles
+  )
+  
+  # Costs with dynamic adjustments
+  costs <- calculate_total_costs(
+    trace,
+    treatment,
+    patient_characteristics,
+    base_year = 2023,
+    discount_rate = 0.035,
+    inflation_rate = 0.03
+  )
+  
+  # Calculate life years
+  life_years <- sum(trace[, states != "Death"]) / 12  # Convert to years
+  
+  # Return results
+  results <- list(
+    trace = trace,
+    qalys = qalys,
+    costs = costs,
+    life_years = life_years,
+    treatment = treatment
+  )
+  
+  return(results)
+}
+
+#==================================================================
+# 6. COST-EFFECTIVENESS ANALYSIS
+#==================================================================
+
+#' Calculate incremental cost-effectiveness ratio (ICER)
+#' @param results_list List of results by treatment
+#' @param reference_treatment Reference treatment for comparison
+#' @return Data frame with ICER results
+calculate_icers <- function(results_list, reference_treatment = "Standard") {
+  # Get treatments
+  treatments <- names(results_list)
+  
+  # Create data frame for results
+  ce_results <- data.frame(
+    treatment = treatments,
+    costs = sapply(results_list, function(x) x$costs),
+    qalys = sapply(results_list, function(x) x$qalys),
+    stringsAsFactors = FALSE
+  )
+  
+  # Order by costs
+  ce_results <- ce_results[order(ce_results$costs), ]
+  
+  # Add incremental columns
+  ce_results$inc_cost <- NA
+  ce_results$inc_qaly <- NA
+  ce_results$icer <- NA
+  
+  # Calculate incremental values vs. reference
+  ref_idx <- which(ce_results$treatment == reference_treatment)
+  ref_cost <- ce_results$costs[ref_idx]
+  ref_qaly <- ce_results$qalys[ref_idx]
+  
+  for (i in 1:nrow(ce_results)) {
+    # Skip reference treatment
+    if (ce_results$treatment[i] == reference_treatment) {
+      ce_results$icer[i] <- "Reference"
+      next
+    }
+    
+    # Calculate incremental values
+    ce_results$inc_cost[i] <- ce_results$costs[i] - ref_cost
+    ce_results$inc_qaly[i] <- ce_results$qalys[i] - ref_qaly
+    
+    # Calculate ICER
+    if (ce_results$inc_qaly[i] > 0) {
+      if (ce_results$inc_cost[i] <= 0) {
+        ce_results$icer[i] <- "Dominant"
+      } else {
+        ce_results$icer[i] <- ce_results$inc_cost[i] / ce_results$inc_qaly[i]
+      }
+    } else {
+      if (ce_results$inc_cost[i] >= 0) {
+        ce_results$icer[i] <- "Dominated"
+      } else {
+        ce_results$icer[i] <- "Cost-saving but less effective"
