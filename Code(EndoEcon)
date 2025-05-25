@@ -441,6 +441,43 @@ extrapolate_qalys <- function(trace_qalys,
   return(total_qalys)
 }
 
+#' Get treatment costs
+#' @return List of treatment costs by treatment
+get_treatment_costs <- function() {
+  # Initial and ongoing costs
+  treatment_costs <- list(
+    "Standard" = list(
+      name = "Combined Oral Contraceptives",
+      initial = 300,  # Initial consultation and tests
+      annual = 500,   # Medication and follow-up
+      monitoring = 200 # Annual monitoring costs
+    ),
+    
+    "GnRH" = list(
+      name = "GnRH Agonists",
+      initial = 500,  # Initial consultation and tests
+      annual = 2000,  # Medication costs
+      monitoring = 500 # More intensive monitoring
+    ),
+    
+    "Surgery" = list(
+      name = "Laparoscopic Excision",
+      initial = 8000,  # Procedure cost
+      annual = 200,    # Annual follow-up
+      monitoring = 300 # Post-surgical monitoring
+    ),
+    
+    "New" = list(
+      name = "Novel Treatment",
+      initial = 1000,  # Initial testing and consultation
+      annual = 3000,   # High-cost new treatment
+      monitoring = 600 # Intensive monitoring for new therapy
+    )
+  )
+  
+  return(treatment_costs)
+}
+
 #==================================================================
 # 4. DYNAMIC COST MODELING
 #==================================================================
