@@ -13,6 +13,6 @@ This project is a cost effectiveness model of a pharmacological intervention for
   Heterogeneous and cyclical symptoms
   Delayed and long-term outcomes
   Multi-domain health impacts
-  Off-label and hormonal therapies
+  Off-label and hormonal therapies 
 
 
